@@ -59,10 +59,12 @@ from activity_core import (
     BASELINE_SEC,
     EXTINCTION_CSV,
     MIN_PEAK_DISTANCE_SEC,
+    SHORT_CHANNEL_MAX_DISTANCE_M,
     STANDARD_BURST_DURATION_SEC,
     ActivityAnalyzer,
     ChannelPair,
     ExtinctionTable,
+    ShortChannelArtifactRemover,
     parse_channels,
 )
 
@@ -150,7 +152,8 @@ class Stimulator:
                 self.dev.disconnect()
 
 
-def run(amp_name, on_sec, off_sec, grace_sec, live, port, ttl_port, amplitude, no_arm):
+def run(amp_name, on_sec, off_sec, grace_sec, live, port, ttl_port, amplitude, no_arm,
+        short_max_distance_m=SHORT_CHANNEL_MAX_DISTANCE_M, artifact_removal=True):
     if live and port is None:
         raise SystemExit("--live requires --port")
     if live and not no_arm and amplitude is None:
@@ -184,6 +187,17 @@ def run(amp_name, on_sec, off_sec, grace_sec, live, port, ttl_port, amplitude, n
         pair = ChannelPair(src, det, idx_by_wl, src_pos, det_pos, dist)
         pair.set_extinction(ext)
         pairs.append(pair)
+
+    remover = None
+    if artifact_removal:
+        candidate = ShortChannelArtifactRemover(pairs, short_max_distance_m)
+        if candidate.active:
+            remover = candidate
+            print(f"[artifact removal] {len(remover.short_pairs)} short / "
+                  f"{len(remover.long_pairs)} long channels (threshold {short_max_distance_m*1000:.1f}mm)")
+        else:
+            print(f"[artifact removal] no short channels found under {short_max_distance_m*1000:.1f}mm -- disabled")
+    activity_pairs = remover.long_pairs if remover is not None else pairs
 
     analyzer = ActivityAnalyzer(sfreq)
 
@@ -235,7 +249,9 @@ def run(amp_name, on_sec, off_sec, grace_sec, live, port, ttl_port, amplitude, n
 
                 for pair in pairs:
                     pair.update(sample)
-                activity_val = -float(np.mean([p.last_hbo for p in pairs]))
+                if remover is not None:
+                    remover.process()  # in-place artifact removal on long-channel last_hbo/last_hbr
+                activity_val = -float(np.mean([p.last_hbo for p in activity_pairs]))
 
                 for ev in analyzer.push(t, activity_val):
                     if ev["kind"] == "peak":
@@ -285,10 +301,17 @@ def main():
     p.add_argument("--no-arm", action="store_true",
                     help="skip arm()/set_amplitude()/disarm() entirely -- only connect() and fire(). "
                          "Use when the stimulator is already armed and configured on its own front panel.")
+    p.add_argument("--short-channel-mm", type=float, default=SHORT_CHANNEL_MAX_DISTANCE_M * 1000,
+                    help=f"source-detector distance (mm) at or below which a channel is treated as a "
+                         f"short-separation channel used to regress out superficial/systemic artifact from the "
+                         f"long channels feeding the trigger detector (default: {SHORT_CHANNEL_MAX_DISTANCE_M*1000:g})")
+    p.add_argument("--no-artifact-removal", action="store_true",
+                    help="disable real-time short-channel/systemic-artifact removal (RLS regression)")
     args = p.parse_args()
 
     run(args.amp_name, args.on_sec, args.off_sec, args.grace_sec, args.live, args.port, args.ttl_port,
-        args.amplitude, args.no_arm)
+        args.amplitude, args.no_arm, short_max_distance_m=args.short_channel_mm / 1000,
+        artifact_removal=not args.no_artifact_removal)
 
 
 if __name__ == "__main__":

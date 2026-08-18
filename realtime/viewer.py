@@ -40,11 +40,13 @@ from activity_core import (
     BASELINE_SEC,
     EXTINCTION_CSV,
     PEAK_TRIGGER_HALF_WIDTH_SEC,
+    SHORT_CHANNEL_MAX_DISTANCE_M,
     STANDARD_BURST_DURATION_SEC,
     STANDARD_BURST_INTERVAL_SEC,
     ActivityAnalyzer,
     ChannelPair,
     ExtinctionTable,
+    ShortChannelArtifactRemover,
     parse_channels,
 )
 
@@ -68,8 +70,12 @@ PEAKTROUGH_TRIGGER_BRUSH = (150, 110, 230, 70)  # purple - peak/trough-centered 
 # Main window
 # --------------------------------------------------------------------------- #
 class Viewer(QtWidgets.QMainWindow):
-    def __init__(self, amp_name: str, marker_name: str):
+    def __init__(self, amp_name: str, marker_name: str, short_max_distance_m: float = SHORT_CHANNEL_MAX_DISTANCE_M,
+                 artifact_removal: bool = True):
         super().__init__()
+        self.short_max_distance_m = short_max_distance_m
+        self.artifact_removal = artifact_removal
+        self.remover: ShortChannelArtifactRemover | None = None
         self.setWindowTitle("fNIRS Real-Time Viewer  —  LSL")
         self.resize(1500, 900)
 
@@ -269,6 +275,16 @@ class Viewer(QtWidgets.QMainWindow):
             pair.set_extinction(self.ext)
             self.pairs.append(pair)
 
+        self.remover = None
+        if self.artifact_removal:
+            remover = ShortChannelArtifactRemover(self.pairs, self.short_max_distance_m)
+            if remover.active:
+                self.remover = remover
+                print(f"[artifact removal] {len(remover.short_pairs)} short / "
+                      f"{len(remover.long_pairs)} long channels (threshold {self.short_max_distance_m*1000:.1f}mm)")
+            else:
+                print(f"[artifact removal] no short channels found under {self.short_max_distance_m*1000:.1f}mm -- disabled")
+
         self.baseline_deadline = None  # set once first sample arrives
         self._draw_probe_map(metas)
 
@@ -397,16 +413,21 @@ class Viewer(QtWidgets.QMainWindow):
                 continue
 
             for pair in self.pairs:
-                dhbo, dhbr = pair.update(sample)
+                pair.update(sample)
+            if self.remover is not None:
+                self.remover.process()  # in-place artifact removal on long-channel last_hbo/last_hbr
+
+            for pair in self.pairs:
                 if pair.label not in self.trace_curves:
                     continue
                 store = self.trace_curves[pair.label].setdefault("_buf", ([], [], []))
                 tbuf, hbo_buf, hbr_buf = store
                 tbuf.append(t)
-                hbo_buf.append(dhbo + self.trace_curves[pair.label]["offset"])
-                hbr_buf.append(dhbr + self.trace_curves[pair.label]["offset"])
+                hbo_buf.append(pair.last_hbo + self.trace_curves[pair.label]["offset"])
+                hbr_buf.append(pair.last_hbr + self.trace_curves[pair.label]["offset"])
 
-            activity_val = -float(np.mean([p.last_hbo for p in self.pairs]))
+            activity_pairs = self.remover.long_pairs if self.remover is not None else self.pairs
+            activity_val = -float(np.mean([p.last_hbo for p in activity_pairs]))
             self.activity_t.append(t)
             self.activity_v.append(activity_val)
             self._update_standard_triggers(t)
@@ -571,10 +592,17 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--amp-name", default="SNIRF_Amplitude")
     p.add_argument("--marker-name", default="SNIRF_Markers")
+    p.add_argument("--short-channel-mm", type=float, default=SHORT_CHANNEL_MAX_DISTANCE_M * 1000,
+                    help=f"source-detector distance (mm) at or below which a channel is treated as a "
+                         f"short-separation channel used to regress out superficial/systemic artifact from the "
+                         f"long channels (default: {SHORT_CHANNEL_MAX_DISTANCE_M*1000:g})")
+    p.add_argument("--no-artifact-removal", action="store_true",
+                    help="disable real-time short-channel/systemic-artifact removal (RLS regression)")
     args = p.parse_args()
 
     app = QtWidgets.QApplication(sys.argv)
-    win = Viewer(args.amp_name, args.marker_name)
+    win = Viewer(args.amp_name, args.marker_name, short_max_distance_m=args.short_channel_mm / 1000,
+                 artifact_removal=not args.no_artifact_removal)
     win.show()
     sys.exit(app.exec_())
 

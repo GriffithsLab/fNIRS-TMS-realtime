@@ -27,6 +27,19 @@ STANDARD_BURST_DURATION_SEC = 2.0
 STANDARD_BURST_INTERVAL_SEC = 10.0
 PEAK_TRIGGER_HALF_WIDTH_SEC = 1.0  # notebook uses 2s windows centered on each peak/trough
 
+# --------------------------------------------------------------------------- #
+# Real-time short-channel / systemic-physiology artifact removal
+# --------------------------------------------------------------------------- #
+# Source-detector distance below which a channel is treated as a short-
+# separation channel (sees scalp/systemic signal only, negligible cerebral
+# contribution). 15mm comfortably covers the common 8mm short-channel
+# hardware while staying well under standard ~30mm long-channel spacing;
+# mne-nirs's short_channel_regression() default threshold is 10mm.
+SHORT_CHANNEL_MAX_DISTANCE_M = 0.015
+N_NEAREST_SHORT_CHANNELS = 3  # short channels used as reference per long channel
+RLS_FORGETTING_FACTOR = 0.999  # lambda; near 1 -> slow, stable adaptation
+RLS_REGULARIZATION = 1e-2  # initial inverse-correlation matrix P0 = I / this
+
 
 # --------------------------------------------------------------------------- #
 # Absorption spectrum lookup
@@ -132,6 +145,104 @@ class ChannelPair:
         self.last_hbo = float(conc[0] * 1e6)  # -> micromolar
         self.last_hbr = float(conc[1] * 1e6)
         return self.last_hbo, self.last_hbr
+
+
+# --------------------------------------------------------------------------- #
+# Real-time short-channel artifact removal
+#
+# Short-separation channels (source-detector distance too small to reach
+# cortex) pick up scalp/systemic physiology -- heartbeat, respiration, Mayer
+# waves, general scalp blood flow -- without a cerebral component, while
+# long channels see that same superficial signal added on top of the
+# cerebral one. Regressing the short-channel signal out of each long
+# channel therefore removes both "short channel signal" and the systemic
+# physiological artifacts it carries in one step (Zhang et al. 2007; Gagnon
+# et al. 2014; the same rationale mne-nirs's short_channel_regression()
+# uses, offline, via a batched GLM).
+#
+# There is no ready-made "real-time RLS" class in mne or mne-realtime to
+# reuse here -- mne-realtime is archived and only ever provided epoch-buffer
+# tools (RtEpochs/RtRegression for buffered, block-wise fits), and
+# mne-nirs's short_channel_regression() is an offline batch GLM over a
+# fixed recording, not a per-sample online estimator. Recursive Least
+# Squares is the standard causal, online algorithm for exactly this
+# adaptive-noise-cancellation problem (Haykin, "Adaptive Filter Theory"),
+# so RLSFilter below is a small self-contained implementation of it.
+# --------------------------------------------------------------------------- #
+class RLSFilter:
+    """Causal multi-reference Recursive Least Squares adaptive filter.
+
+    Predicts the desired (contaminated) signal `d` from a reference vector
+    `x` on every sample, adapting its weights after each prediction so the
+    filter tracks slowly-changing coupling between references and target.
+    Unlike a batch regression, it needs no fixed window and never looks
+    ahead, so it is safe to use in a live stream.
+    """
+
+    def __init__(self, n_refs: int, forgetting_factor: float = RLS_FORGETTING_FACTOR, delta: float = RLS_REGULARIZATION):
+        self.lam = forgetting_factor
+        self.w = np.zeros(n_refs)
+        self.P = np.eye(n_refs) / delta
+
+    def update(self, x: np.ndarray, d: float) -> tuple[float, float]:
+        """One RLS step. Returns (cleaned_estimate, predicted_artifact)."""
+        Px = self.P @ x
+        gain = Px / (self.lam + float(x @ Px))
+        y_hat = float(self.w @ x)  # predicted superficial/systemic contribution
+        e = d - y_hat  # artifact-removed residual
+        self.w = self.w + gain * e
+        self.P = (self.P - np.outer(gain, Px)) / self.lam
+        return e, y_hat
+
+
+class ShortChannelArtifactRemover:
+    """Removes short-channel-correlated superficial/systemic signal from
+    every long channel's HbO/HbR, in place, sample by sample.
+
+    Each long channel is paired with its `N_NEAREST_SHORT_CHANNELS` nearest
+    short channels (by probe midpoint distance) as the RLS reference
+    vector -- one independent RLS filter per long channel per chromophore
+    (HbO, HbR), so coupling strength can differ by hemoglobin species and
+    by scalp location.
+    """
+
+    def __init__(
+        self,
+        pairs: list[ChannelPair],
+        short_max_distance_m: float = SHORT_CHANNEL_MAX_DISTANCE_M,
+        n_nearest: int = N_NEAREST_SHORT_CHANNELS,
+    ):
+        self.short_pairs = [p for p in pairs if p.distance_m <= short_max_distance_m]
+        self.long_pairs = [p for p in pairs if p.distance_m > short_max_distance_m]
+        self._nearest: dict[str, list[ChannelPair]] = {}
+        self._filters: dict[str, tuple[RLSFilter, RLSFilter]] = {}
+        for lp in self.long_pairs:
+            if not self.short_pairs:
+                continue
+            order = sorted(self.short_pairs, key=lambda sp: float(np.linalg.norm(lp.mid - sp.mid)))
+            nearest = order[:n_nearest]
+            self._nearest[lp.label] = nearest
+            self._filters[lp.label] = (RLSFilter(len(nearest)), RLSFilter(len(nearest)))
+
+    @property
+    def active(self) -> bool:
+        """True once there is at least one short and one long channel to work with."""
+        return bool(self.short_pairs) and bool(self.long_pairs)
+
+    def process(self) -> None:
+        """Call once per sample, after ChannelPair.update() has run on every
+        pair (short and long alike). Overwrites each long channel's
+        last_hbo/last_hbr in place with the artifact-removed estimate."""
+        for lp in self.long_pairs:
+            filt = self._filters.get(lp.label)
+            if filt is None:
+                continue
+            hbo_filt, hbr_filt = filt
+            refs = self._nearest[lp.label]
+            x_hbo = np.array([r.last_hbo for r in refs])
+            x_hbr = np.array([r.last_hbr for r in refs])
+            lp.last_hbo, _ = hbo_filt.update(x_hbo, lp.last_hbo)
+            lp.last_hbr, _ = hbr_filt.update(x_hbr, lp.last_hbr)
 
 
 # --------------------------------------------------------------------------- #
