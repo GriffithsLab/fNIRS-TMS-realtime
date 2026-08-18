@@ -5,7 +5,13 @@ stimulation, built as a live version of the offline analysis in
 [`Occipital_fNIRS_iTBS_Analysis_Executed.ipynb`](Occipital_fNIRS_iTBS_Analysis_Executed.ipynb)
 (peak/trough detection → categorization → activity-based iTBS triggers).
 
-All code lives in [`realtime/`](realtime/).
+All code lives in [`realtime/`](realtime/). Validation/analysis notebooks live in
+[`reports/`](reports/), e.g.
+[`ShortChannelRegression_Analysis_Executed.ipynb`](reports/ShortChannelRegression_Analysis_Executed.ipynb),
+which evaluates the real-time short-channel/systemic-artifact removal below
+on a simulated dataset with known ground truth: periodicity/spectral impact,
+peak/trough detection quality, and its interaction with a hypothetical
+phastimate-style AR forecasting stage.
 
 ## Components
 
