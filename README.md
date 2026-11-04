@@ -1,9 +1,7 @@
 # TMS-fNIRS-realtime
 
-Real-time occipital fNIRS activity monitoring with peak/trough-triggered iTBS
-stimulation, built as a live version of the offline analysis in
-[`Occipital_fNIRS_iTBS_Analysis_Executed.ipynb`](Occipital_fNIRS_iTBS_Analysis_Executed.ipynb)
-(peak/trough detection → categorization → activity-based iTBS triggers).
+Real-time fNIRS activity monitoring with peak/trough-triggered iTBS
+stimulation. 
 
 All code lives in [`realtime/`](realtime/).
 
