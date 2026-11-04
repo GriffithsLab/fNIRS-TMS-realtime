@@ -5,6 +5,9 @@ stimulation.
 
 All code lives in [`realtime/`](realtime/).
 
+This is code is work-in-progress; please contact us to discuss through an Issue on this repo before initiating any projects using it. 
+
+
 ## Components
 
 | File | What it does |
