@@ -1,4 +1,4 @@
-# fNIRS-TMS-realtime
+# TMS-fNIRS-realtime
 
 Real-time occipital fNIRS activity monitoring with peak/trough-triggered iTBS
 stimulation, built as a live version of the offline analysis in
